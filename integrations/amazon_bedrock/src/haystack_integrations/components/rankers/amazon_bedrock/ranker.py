@@ -220,10 +220,9 @@ class AmazonBedrockRanker:
         if not documents:
             return {"documents": []}
 
-        def resolve_secret(secret: Secret | str | None) -> str | None:
-            return secret.resolve_value() if isinstance(secret, Secret) else secret
-
-        region = resolve_secret(self.aws_region_name)
+        # The client knows the region it actually uses, including one taken from the AWS profile or config file
+        # when `aws_region_name` is not set.
+        region = self._bedrock_client.meta.region_name
 
         bedrock_input_docs = self._prepare_bedrock_input_docs(documents)
         if len(bedrock_input_docs) > MAX_NUM_DOCS_FOR_BEDROCK_RANKER:

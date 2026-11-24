@@ -59,6 +59,19 @@ def test_bedrock_ranker_run(mock_aws_session):
     assert result["documents"][1].score == 0.7
 
 
+def test_bedrock_ranker_run_uses_client_region_in_model_arn(mock_aws_session):
+    # region is not passed explicitly, so boto3 picks it up from the AWS profile or config file
+    ranker = AmazonBedrockRanker(model="cohere.rerank-v3-5:0", aws_region_name=None)
+    mock_aws_session.meta.region_name = "eu-central-1"
+    mock_aws_session.rerank.return_value = {"results": [{"index": 0, "relevanceScore": 0.9}]}
+
+    ranker.run(query="test query", documents=[Document(content="Test document 1")])
+
+    reranking_config = mock_aws_session.rerank.call_args.kwargs["rerankingConfiguration"]
+    model_arn = reranking_config["bedrockRerankingConfiguration"]["modelConfiguration"]["modelArn"]
+    assert model_arn == "arn:aws:bedrock:eu-central-1::foundation-model/cohere.rerank-v3-5:0"
+
+
 def test_amazon_bedrock_ranker_run_inference_error(mock_aws_session):
     ranker = AmazonBedrockRanker(
         model="cohere.rerank-v3-5:0",
