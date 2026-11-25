@@ -200,14 +200,41 @@ def _parse_response(chat_response: ChatResponse, model: str) -> ChatMessage:
         "citations": chat_response.message.citations,
     }
     # In V2, token usage is part of the response object, not the message
-    if chat_response.usage and chat_response.usage.billed_units:
-        base_meta["usage"] = {
-            "prompt_tokens": chat_response.usage.billed_units.input_tokens,
-            "completion_tokens": chat_response.usage.billed_units.output_tokens,
-        }
+    base_meta["usage"] = _extract_usage(chat_response.usage)
 
     message = ChatMessage.from_assistant(text=text_content, tool_calls=tool_calls, meta=base_meta)
     return message
+
+
+def _extract_usage(usage_data: Any) -> dict[str, float]:
+    """
+    Builds the `usage` meta dict from the usage data returned by Cohere.
+
+    The Cohere API is subject to changes in how usage data is returned, so both dicts and objects are supported.
+    Missing usage data or token counts that are `None` count as 0.
+
+    :param usage_data: The `usage` of a Cohere chat response or of a streaming `message-end` chunk.
+    :returns: A dict with `prompt_tokens`, `completion_tokens` and `total_tokens`.
+    """
+    if isinstance(usage_data, dict):
+        billed_units = usage_data.get("billed_units")
+    else:
+        billed_units = getattr(usage_data, "billed_units", None)
+
+    if isinstance(billed_units, dict):
+        input_tokens = billed_units.get("input_tokens")
+        output_tokens = billed_units.get("output_tokens")
+    else:
+        input_tokens = getattr(billed_units, "input_tokens", None)
+        output_tokens = getattr(billed_units, "output_tokens", None)
+
+    prompt_tokens = input_tokens if input_tokens is not None else 0.0
+    completion_tokens = output_tokens if output_tokens is not None else 0.0
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+    }
 
 
 def _convert_cohere_chunk_to_streaming_chunk(
@@ -292,25 +319,7 @@ def _convert_cohere_chunk_to_streaming_chunk(
         finish_reason = FINISH_REASON_MAPPING.get(finish_reason_raw) if finish_reason_raw else None
 
         # The Cohere API is subject to changes in how usage data is returned. We try to support both dict and objects.
-        usage_data = getattr(chunk.delta, "usage", None)
-        prompt_tokens, completion_tokens = 0.0, 0.0
-        if isinstance(usage_data, dict):
-            try:
-                prompt_tokens = usage_data["billed_units"]["input_tokens"]
-                completion_tokens = usage_data["billed_units"]["output_tokens"]
-            except KeyError:
-                pass
-        elif (
-            usage_data is not None
-            and hasattr(usage_data, "billed_units")
-            and usage_data.billed_units
-            and usage_data.billed_units.input_tokens is not None
-            and usage_data.billed_units.output_tokens is not None
-        ):
-            prompt_tokens = usage_data.billed_units.input_tokens
-            completion_tokens = usage_data.billed_units.output_tokens
-
-        usage = {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}
+        usage = _extract_usage(getattr(chunk.delta, "usage", None))
 
         meta["finish_reason"] = finish_reason_raw
         meta["usage"] = usage

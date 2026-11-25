@@ -27,6 +27,8 @@ from haystack.dataclasses import ChatMessage, ComponentInfo, StreamingChunk, Too
 
 from haystack_integrations.components.generators.cohere.chat.chat_generator import (
     _convert_cohere_chunk_to_streaming_chunk,
+    _extract_usage,
+    _parse_response,
     _parse_streaming_response,
 )
 
@@ -308,7 +310,7 @@ def expected_streaming_chunks():
             meta={
                 "model": "command-a-03-2025",
                 "finish_reason": "TOOL_CALL",
-                "usage": {"prompt_tokens": 60.0, "completion_tokens": 41.0},
+                "usage": {"prompt_tokens": 60.0, "completion_tokens": 41.0, "total_tokens": 101.0},
             },
             index=2,
             finish_reason="tool_calls",
@@ -357,7 +359,7 @@ class TestCohereChunkConversion:
                 "completion_start_time": None,
                 "finish_reason": "tool_calls",
                 "index": 0,
-                "usage": {"prompt_tokens": 60.0, "completion_tokens": 41.0},
+                "usage": {"prompt_tokens": 60.0, "completion_tokens": 41.0, "total_tokens": 101.0},
                 "citations": None,
             },
         )
@@ -381,7 +383,7 @@ class TestCohereChunkConversion:
         assert result.finish_reason == "stop"  # Mapped from "COMPLETE"
         assert result.tool_calls is None
         assert result.meta["finish_reason"] == "COMPLETE"
-        assert result.meta["usage"] == {"prompt_tokens": 9, "completion_tokens": 75}
+        assert result.meta["usage"] == {"prompt_tokens": 9, "completion_tokens": 75, "total_tokens": 84}
 
     def test_convert_unknown_chunk_type(self):
         mock_chunk = MagicMock()
@@ -406,7 +408,73 @@ class TestCohereChunkConversion:
         mock_chunk = MsgEndStream(type="message-end", delta=MsgEndDelta(finish_reason="COMPLETE", usage=None))
         result = _convert_cohere_chunk_to_streaming_chunk(chunk=mock_chunk, model="command-r-08-2024")
 
-        assert result.meta["usage"] == {"completion_tokens": 0.0, "prompt_tokens": 0.0}
+        assert result.meta["usage"] == {"completion_tokens": 0.0, "prompt_tokens": 0.0, "total_tokens": 0.0}
+
+    @pytest.mark.parametrize(
+        "usage",
+        [
+            Usage(billed_units=BilledUnits(input_tokens=9.0, output_tokens=75.0)),
+            {"billed_units": {"input_tokens": 9.0, "output_tokens": 75.0}},
+            {"billed_units": BilledUnits(input_tokens=9.0, output_tokens=75.0)},
+        ],
+        ids=["object", "dict", "dict-with-object-billed-units"],
+    )
+    def test_extract_usage_includes_total_tokens(self, usage):
+        assert _extract_usage(usage) == {"prompt_tokens": 9.0, "completion_tokens": 75.0, "total_tokens": 84.0}
+
+    @pytest.mark.parametrize(
+        "usage",
+        [
+            None,
+            Usage(billed_units=None),
+            Usage(billed_units=BilledUnits(input_tokens=None, output_tokens=None)),
+            {},
+            {"billed_units": None},
+            {"billed_units": {}},
+            {"billed_units": {"input_tokens": None, "output_tokens": None}},
+        ],
+        ids=[
+            "none",
+            "no-billed-units",
+            "none-tokens",
+            "empty-dict",
+            "dict-none-billed",
+            "dict-empty-billed",
+            "dict-none-tokens",
+        ],
+    )
+    def test_extract_usage_missing_data_is_zero(self, usage):
+        assert _extract_usage(usage) == {"prompt_tokens": 0.0, "completion_tokens": 0.0, "total_tokens": 0.0}
+
+    def test_extract_usage_partial_tokens(self):
+        usage = Usage(billed_units=BilledUnits(input_tokens=9.0, output_tokens=None))
+        assert _extract_usage(usage) == {"prompt_tokens": 9.0, "completion_tokens": 0.0, "total_tokens": 9.0}
+
+    @pytest.mark.parametrize(
+        "usage",
+        [
+            Usage(billed_units=BilledUnits(input_tokens=9.0, output_tokens=75.0)),
+            Usage(billed_units=BilledUnits(input_tokens=9.0, output_tokens=None)),
+            Usage(billed_units=None),
+            None,
+        ],
+        ids=["full", "none-output", "no-billed-units", "no-usage"],
+    )
+    def test_streaming_and_non_streaming_usage_match(self, usage):
+        chunk = MsgEndStream(type="message-end", delta=MsgEndDelta(finish_reason="COMPLETE", usage=usage))
+        streaming_usage = _convert_cohere_chunk_to_streaming_chunk(chunk=chunk, model="command-r-08-2024").meta["usage"]
+
+        response = MagicMock()
+        response.message.content = None
+        response.message.tool_calls = None
+        response.message.tool_plan = None
+        response.message.citations = None
+        response.finish_reason = "COMPLETE"
+        response.usage = usage
+        message = _parse_response(response, model="command-r-08-2024")
+
+        assert message.meta["usage"] == streaming_usage
+        assert "total_tokens" in message.meta["usage"]
 
     def test_convert_citation_start_chunk(self):
         citation = MagicMock()
